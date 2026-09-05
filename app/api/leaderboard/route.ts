@@ -8,7 +8,8 @@ const METRICS = ["follower", "views", "new_video", "engagement", "weekly_bonus",
 
 /**
  * Bảng xếp hạng public — không bao giờ trả SĐT. Cache CDN 5 phút.
- * ?detail=1: kèm điểm thành phần từng chỉ số, điểm hôm nay, số kênh đã xác minh của mỗi học viên.
+ * ?detail=1: kèm điểm thành phần, điểm hôm nay, tổng follower/view/tương tác hiện tại,
+ * % tăng follower so hôm qua và danh sách kênh (có link) của từng học viên.
  */
 export async function GET(req: NextRequest) {
   const campaignId = req.nextUrl.searchParams.get("campaign_id");
@@ -26,7 +27,11 @@ export async function GET(req: NextRequest) {
   let breakdownByStudent = new Map<string, Record<string, number>>();
   let todayByStudent = new Map<string, number>();
   let lastEntryDate: string | null = null;
-  let channelsByStudent = new Map<string, number>();
+  let channelsByStudent = new Map<string, any[]>();
+  let followersByStudent = new Map<string, number>();
+  let viewsByStudent = new Map<string, number>();
+  let engagementByStudent = new Map<string, number>();
+  let prevFollowersByStudent = new Map<string, number>();
 
   if (detail) {
     const { data: entries } = await db
@@ -48,11 +53,47 @@ export async function GET(req: NextRequest) {
     if (ids.length) {
       const { data: chans } = await db
         .from("channels")
-        .select("student_id")
+        .select("id, student_id, platform, username, url")
         .in("student_id", ids)
         .eq("status", "verified");
+      const chById = new Map<string, any>();
+      for (const c of chans ?? []) chById.set(c.id, c);
+
+      // 2 snapshot mới nhất của từng kênh: [0] số hiện tại, [1] số hôm qua (tính % tăng)
+      const chIds = [...chById.keys()];
+      const latestByCh = new Map<string, any>();
+      const prevByCh = new Map<string, any>();
+      if (chIds.length) {
+        const { data: snaps } = await db
+          .from("channel_snapshots")
+          .select("channel_id, followers, total_views, videos_count, engagement, snapshot_date")
+          .in("channel_id", chIds)
+          .order("snapshot_date", { ascending: false })
+          .limit(chIds.length * 4);
+        for (const s of snaps ?? []) {
+          if (!latestByCh.has(s.channel_id)) latestByCh.set(s.channel_id, s);
+          else if (!prevByCh.has(s.channel_id)) prevByCh.set(s.channel_id, s);
+        }
+      }
+
       for (const c of chans ?? []) {
-        channelsByStudent.set(c.student_id, (channelsByStudent.get(c.student_id) ?? 0) + 1);
+        const latest = latestByCh.get(c.id);
+        const prev = prevByCh.get(c.id);
+        const sid = c.student_id;
+        if (!channelsByStudent.has(sid)) channelsByStudent.set(sid, []);
+        channelsByStudent.get(sid)!.push({
+          platform: c.platform,
+          username: c.username,
+          url: c.url,
+          followers: latest?.followers ?? null,
+          views: latest?.total_views != null ? Number(latest.total_views) : null,
+          videos: latest?.videos_count ?? null,
+          engagement: latest?.engagement != null ? Number(latest.engagement) : null,
+        });
+        followersByStudent.set(sid, (followersByStudent.get(sid) ?? 0) + (latest?.followers ?? 0));
+        viewsByStudent.set(sid, (viewsByStudent.get(sid) ?? 0) + Number(latest?.total_views ?? 0));
+        engagementByStudent.set(sid, (engagementByStudent.get(sid) ?? 0) + Number(latest?.engagement ?? 0));
+        prevFollowersByStudent.set(sid, (prevFollowersByStudent.get(sid) ?? 0) + (prev?.followers ?? latest?.followers ?? 0));
       }
     }
   }
@@ -71,11 +112,18 @@ export async function GET(req: NextRequest) {
       };
       if (!detail) return base;
       const b = breakdownByStudent.get(r.student_id) ?? {};
+      const nowF = followersByStudent.get(r.student_id) ?? 0;
+      const prevF = prevFollowersByStudent.get(r.student_id) ?? 0;
       return {
         ...base,
         breakdown: Object.fromEntries(METRICS.map((m) => [m, Math.round((b[m] ?? 0) * 100) / 100])),
         today_points: Math.round((todayByStudent.get(r.student_id) ?? 0) * 100) / 100,
-        verified_channels: channelsByStudent.get(r.student_id) ?? 0,
+        verified_channels: (channelsByStudent.get(r.student_id) ?? []).length,
+        channel_followers: nowF,
+        channel_views: viewsByStudent.get(r.student_id) ?? 0,
+        channel_engagement: engagementByStudent.get(r.student_id) ?? 0,
+        follower_growth_pct: prevF > 0 ? Math.round(((nowF - prevF) / prevF) * 1000) / 10 : null,
+        channels: channelsByStudent.get(r.student_id) ?? [],
       };
     })
     .sort((a, b) => (a.rank ?? 9999) - (b.rank ?? 9999));

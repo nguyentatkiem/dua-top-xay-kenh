@@ -1,11 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Lane, LBRow, METRIC_LABEL, SiteHeader, useToast } from "@/components/ui";
 
 type Prize = { label: string; reward: string };
 type Campaign = {
-  id: string; name: string; scope: string; class_names: string[];
+  id: string; name: string; scope: string; class_names: string[]; class_ids: string[];
   start_date: string; end_date: string; registration_deadline: string | null;
   prize: string | null; prizes: Prize[]; weights: Record<string, number>; weekly_quota: number;
   status: string; participants: number;
@@ -17,9 +17,75 @@ type StudentRow = {
 
 const fmt = (n: number) => Math.round(n).toLocaleString("vi-VN");
 const dmy = (d: string | null) => (d ? d.split("-").reverse().join("/") : "—");
+/* ==== Ô nhập ngày định dạng Việt dd/mm/yyyy cố định (không phụ thuộc ngôn ngữ trình duyệt) ====
+ * Gõ tay tự chèn dấu "/", hoặc bấm 📅 mở lịch. Giá trị lưu/truyền đi luôn là ISO yyyy-mm-dd. */
+const iso2dmy = (iso: string): string =>
+  /^\d{4}-\d{2}-\d{2}$/.test(iso) ? iso.split("-").reverse().join("/") : "";
+const dmy2iso = (t: string): string | null => {
+  const m = t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (!m) return null;
+  const [, d, mo, y] = m;
+  const iso = `${y}-${mo.padStart(2, "0")}-${d.padStart(2, "0")}`;
+  const dt = new Date(`${iso}T00:00:00`);
+  if (isNaN(dt.getTime()) || dt.getDate() !== Number(d) || dt.getMonth() + 1 !== Number(mo)) return null;
+  return iso;
+};
+
+function DateField({ value, onChange, disabled }: { value: string; onChange: (iso: string) => void; disabled?: boolean }) {
+  const [text, setText] = useState(iso2dmy(value));
+  const [bad, setBad] = useState(false);
+  const pickerRef = useRef<HTMLInputElement>(null);
+  useEffect(() => { setText(iso2dmy(value)); setBad(false); }, [value]);
+
+  function handleText(raw: string) {
+    // chỉ giữ số, tự chèn "/" theo dd/mm/yyyy
+    const digits = raw.replace(/\D/g, "").slice(0, 8);
+    let t = digits;
+    if (digits.length > 4) t = `${digits.slice(0, 2)}/${digits.slice(2, 4)}/${digits.slice(4)}`;
+    else if (digits.length > 2) t = `${digits.slice(0, 2)}/${digits.slice(2)}`;
+    setText(t);
+    if (!t) { setBad(false); onChange(""); return; }
+    const iso = dmy2iso(t);
+    if (iso) { setBad(false); onChange(iso); }
+    else setBad(t.length >= 10);
+  }
+
+  return (
+    <div style={{ display: "flex", gap: 6 }}>
+      <input
+        value={text}
+        onChange={(e) => handleText(e.target.value)}
+        placeholder="dd/mm/yyyy"
+        inputMode="numeric"
+        disabled={disabled}
+        style={bad ? { borderColor: "var(--red)" } : undefined}
+      />
+      <button
+        type="button"
+        className="btn-ghost btn-sm"
+        disabled={disabled}
+        title="Mở lịch"
+        style={{ flexShrink: 0 }}
+        onClick={() => { const p = pickerRef.current as any; if (p?.showPicker) p.showPicker(); else p?.click(); }}
+      >
+        📅
+      </button>
+      <input
+        ref={pickerRef}
+        type="date"
+        value={/^\d{4}-\d{2}-\d{2}$/.test(value) ? value : ""}
+        onChange={(e) => onChange(e.target.value)}
+        disabled={disabled}
+        tabIndex={-1}
+        aria-hidden
+        style={{ position: "absolute", width: 1, height: 1, opacity: 0, pointerEvents: "none" }}
+      />
+    </div>
+  );
+}
 const STATUS_PILL: Record<string, [string, string]> = {
   running: ["pill-live", "Đang chạy"],
-  open: ["pill-soon", "Sắp mở"],
+  open: ["pill-soon", "Mở đăng ký"],
   draft: ["pill-soon", "Nháp"],
   paused: ["pill-warn", "Tạm dừng"],
   finished: ["pill-done", "Đã kết thúc"],
@@ -52,8 +118,13 @@ export default function AdminPage() {
     weekly_quota: "5",
     weights: { follower: "10", per_1000_views: "5", new_video: "20", engagement: "2", weekly_bonus: "100" },
   });
+  const [newClassName, setNewClassName] = useState("");
   // Modal sửa giải thưởng (sửa được mọi lúc, kể cả khi đang chạy)
   const [prizeEdit, setPrizeEdit] = useState<{ camp: Campaign; rows: Prize[] } | null>(null);
+  const [editCamp, setEditCamp] = useState<{
+    id: string; status: string; scope: string; name: string; start_date: string; end_date: string;
+    registration_deadline: string; weekly_quota: string; weights: Record<string, string>; class_ids: string[];
+  } | null>(null);
 
   const loadCampaigns = useCallback(async () => {
     const r = await fetch("/api/admin/campaigns");
@@ -105,9 +176,8 @@ export default function AdminPage() {
       const d = await r.json();
       if (!r.ok) { toast(d.error ?? "Lỗi"); return; }
       if (action === "scrape") {
-        toast(d.started?.length
-          ? `Đã start ${d.started.length} run Apify (${d.started.map((s: any) => `${s.platform}: ${s.channels} kênh`).join(", ")})`
-          : "Không có kênh nào cần quét hoặc nền tảng nào đang bật");
+        const parts = (d.platforms ?? []).map((s: any) => `${s.platform}: ${s.ok}/${s.channels} kênh${s.verified ? ` (+${s.verified} xác minh)` : ""}`);
+        toast(parts.length ? `Đã quét xong — ${parts.join(" · ")}` : "Không có kênh nào cần quét hoặc nền tảng nào đang bật");
       } else {
         toast(`Đã tính điểm ${d.date}: ${d.campaigns} chiến dịch, ${d.entries} dòng điểm${d.flagged?.length ? `, gắn cờ ${d.flagged.length} kênh` : ""}`);
       }
@@ -117,16 +187,6 @@ export default function AdminPage() {
     }
   }
 
-  async function editActor(cfg: any) {
-    const actor = prompt(`Actor Apify cho ${cfg.platform} (dạng tac-gia/ten-actor):`, cfg.apify_actor)?.trim();
-    if (!actor || actor === cfg.apify_actor) return;
-    const r = await fetch("/api/admin/scrape", {
-      method: "PATCH", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ platform: cfg.platform, apify_actor: actor }),
-    });
-    if (r.ok) { toast("Đã đổi Actor"); loadScrape(); }
-    else toast((await r.json()).error ?? "Lỗi");
-  }
 
   async function togglePlatform(cfg: any) {
     const r = await fetch("/api/admin/scrape", {
@@ -144,6 +204,35 @@ export default function AdminPage() {
     });
     if (r.ok) { setAuthed(true); loadCampaigns(); }
     else toast((await r.json()).error ?? "Sai mật khẩu");
+  }
+
+  async function createClass() {
+    const name = newClassName.trim();
+    if (!name) { toast("Nhập tên lớp trước đã"); return; }
+    const r = await fetch("/api/admin/classes", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }),
+    });
+    const d = await r.json();
+    if (!r.ok) { toast(d.error ?? "Không tạo được lớp"); return; }
+    setClasses((prev) => [...prev, d.class].sort((a, b) => a.name.localeCompare(b.name, "vi")));
+    setForm((f) => ({ ...f, class_ids: [...f.class_ids, d.class.id] }));
+    setNewClassName("");
+    toast(`Đã tạo lớp "${d.class.name}" và chọn sẵn cho chiến dịch`);
+  }
+
+  async function deleteSelectedClasses() {
+    const targets = classes.filter((c) => form.class_ids.includes(c.id));
+    if (!targets.length) { toast("Bấm chọn lớp cần xóa trong danh sách trước đã"); return; }
+    const names = targets.map((c) => `"${c.name}"`).join(", ");
+    if (!confirm(`Xóa ${targets.length} lớp: ${names}?\nLớp đã có học viên hoặc chiến dịch sẽ chỉ bị ẩn đi, không mất dữ liệu.`)) return;
+    for (const c of targets) {
+      const r = await fetch(`/api/admin/classes/${c.id}`, { method: "DELETE" });
+      const d = await r.json();
+      if (!r.ok) { toast(d.error ?? `Không xóa được lớp "${c.name}"`); continue; }
+      setClasses((prev) => prev.filter((x) => x.id !== c.id));
+      setForm((f) => ({ ...f, class_ids: f.class_ids.filter((id) => id !== c.id) }));
+      toast(d.deleted ? `Đã xóa lớp "${c.name}"` : `Lớp "${c.name}" đang có ${d.students} học viên, ${d.campaigns} chiến dịch — đã ẩn khỏi danh sách`);
+    }
   }
 
   async function createCampaign() {
@@ -181,6 +270,39 @@ export default function AdminPage() {
     else toast(d.error ?? "Không cập nhật được");
   }
 
+  function openCampaignEdit(c: Campaign) {
+    setEditCamp({
+      id: c.id, status: c.status, scope: c.scope, name: c.name,
+      start_date: c.start_date, end_date: c.end_date,
+      registration_deadline: c.registration_deadline ?? "",
+      weekly_quota: String(c.weekly_quota ?? 0),
+      weights: Object.fromEntries(Object.entries(c.weights ?? {}).map(([k, v]) => [k, String(v)])),
+      class_ids: c.class_ids ?? [],
+    });
+  }
+
+  async function saveCampaignEdit() {
+    if (!editCamp) return;
+    const frozen = !["draft", "open"].includes(editCamp.status);
+    const body: Record<string, unknown> = {
+      name: editCamp.name,
+      end_date: editCamp.end_date,
+      registration_deadline: editCamp.registration_deadline || null,
+    };
+    if (editCamp.scope === "class") body.class_ids = editCamp.class_ids;
+    if (!frozen) {
+      body.start_date = editCamp.start_date;
+      body.weekly_quota = Number(editCamp.weekly_quota || 0);
+      body.weights = Object.fromEntries(Object.entries(editCamp.weights).map(([k, v]) => [k, Number(v || 0)]));
+    }
+    const r = await fetch(`/api/admin/campaigns/${editCamp.id}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    });
+    const d = await r.json();
+    if (r.ok) { toast("Đã cập nhật chiến dịch"); setEditCamp(null); loadCampaigns(); }
+    else toast(d.error ?? "Không cập nhật được");
+  }
+
   async function savePrizes() {
     if (!prizeEdit) return;
     const r = await fetch(`/api/admin/campaigns/${prizeEdit.camp.id}`, {
@@ -203,6 +325,20 @@ export default function AdminPage() {
     else toast((await r.json()).error ?? "Lỗi");
   }
 
+  async function removeChannel(chId: string, username: string) {
+    const reason = prompt(`Gỡ kênh @${username}? Kênh sẽ ẩn khỏi hệ thống và ngừng tính điểm (lịch sử vẫn giữ).\nNhập lý do (bắt buộc):`);
+    if (!reason) return;
+    const r = await fetch(`/api/admin/channels/${chId}?reason=${encodeURIComponent(reason)}`, { method: "DELETE" });
+    if (r.ok) { toast("Đã gỡ kênh"); openProfile(profile.student.id); loadStudents(q); }
+    else toast((await r.json()).error ?? "Lỗi");
+  }
+
+  async function restoreChannel(chId: string) {
+    const r = await fetch(`/api/admin/channels/${chId}`, { method: "PATCH" });
+    if (r.ok) { toast("Đã khôi phục kênh — chờ xác minh lại"); openProfile(profile.student.id); loadStudents(q); }
+    else toast((await r.json()).error ?? "Lỗi");
+  }
+
   async function toggleLock() {
     const lock = profile.student.status !== "locked";
     const reason = lock ? prompt("Lý do khóa học viên (bắt buộc):") : null;
@@ -212,6 +348,17 @@ export default function AdminPage() {
       body: JSON.stringify({ status: lock ? "locked" : "active", reason }),
     });
     if (r.ok) { toast(lock ? "Đã khóa học viên" : "Đã mở khóa"); openProfile(profile.student.id); }
+  }
+
+  async function deleteStudent() {
+    const s = profile.student;
+    if (!confirm(`XÓA HẲN hồ sơ "${s.full_name}" (${s.public_id})?\n\nSẽ xóa vĩnh viễn: toàn bộ kênh (giải phóng cho người khác đăng ký), điểm số, lịch sử ghi danh.\nHành động này KHÔNG hoàn tác được.`)) return;
+    const reason = prompt("Nhập lý do xóa (bắt buộc, lưu vào nhật ký hệ thống):");
+    if (!reason?.trim()) return;
+    const r = await fetch(`/api/admin/students/${s.id}?reason=${encodeURIComponent(reason)}`, { method: "DELETE" });
+    const d = await r.json();
+    if (r.ok) { toast(`Đã xóa hồ sơ ${s.public_id}`); setProfile(null); loadStudents(q); }
+    else toast(d.error ?? "Không xóa được");
   }
 
   async function adjustScore(campaignId: string) {
@@ -259,7 +406,7 @@ export default function AdminPage() {
           <button className={tab === "new" ? "on" : ""} onClick={() => setTab("new")}>+ Tạo chiến dịch</button>
           <button className={tab === "students" ? "on" : ""} onClick={() => setTab("students")}>Học viên</button>
           <button className={tab === "bxh" ? "on" : ""} onClick={() => setTab("bxh")}>Bảng xếp hạng</button>
-          <button className={tab === "scrape" ? "on" : ""} onClick={() => setTab("scrape")}>Quét & Apify</button>
+          <button className={tab === "scrape" ? "on" : ""} onClick={() => setTab("scrape")}>Quét dữ liệu</button>
         </div>
 
         {tab === "camp" && (
@@ -292,6 +439,7 @@ export default function AdminPage() {
                           <td>{c.participants || "—"}</td>
                           <td><span className={`pill ${pill[0]}`}>{pill[1]}</span></td>
                           <td style={{ whiteSpace: "nowrap" }}>
+                            <button className="btn-ghost btn-sm" onClick={() => openCampaignEdit(c)}>✏️ Sửa</button>{" "}
                             <button
                               className="btn-ghost btn-sm"
                               onClick={() => setPrizeEdit({
@@ -341,16 +489,24 @@ export default function AdminPage() {
                   <select multiple size={3} value={form.class_ids}
                     onChange={(e) => setForm({ ...form, class_ids: Array.from(e.target.selectedOptions).map((o) => o.value) })}>
                     {classes.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-                  </select></div>
+                  </select>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr auto auto", gap: 8, marginTop: 8 }}>
+                    <input value={newClassName} placeholder="Chưa có lớp? Nhập tên lớp mới, ví dụ: Minh Trí Kim Cương K13"
+                      onChange={(e) => setNewClassName(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter") createClass(); }} />
+                    <button className="btn-ghost btn-sm" onClick={createClass}>+ Thêm lớp</button>
+                    <button className="btn-ghost btn-sm btn-danger" onClick={deleteSelectedClasses}>🗑 Xóa lớp đang chọn</button>
+                  </div>
+                </div>
               )}
               <div className="two-col">
                 <div className="field"><label>Ngày bắt đầu</label>
-                  <input type="date" value={form.start_date} onChange={(e) => setForm({ ...form, start_date: e.target.value })} /></div>
+                  <DateField value={form.start_date} onChange={(v) => setForm({ ...form, start_date: v })} /></div>
                 <div className="field"><label>Ngày kết thúc</label>
-                  <input type="date" value={form.end_date} onChange={(e) => setForm({ ...form, end_date: e.target.value })} /></div>
+                  <DateField value={form.end_date} onChange={(v) => setForm({ ...form, end_date: v })} /></div>
               </div>
               <div className="field"><label>Hạn chốt đăng ký kênh</label>
-                <input type="date" value={form.registration_deadline} onChange={(e) => setForm({ ...form, registration_deadline: e.target.value })} /></div>
+                <DateField value={form.registration_deadline} onChange={(v) => setForm({ ...form, registration_deadline: v })} /></div>
               <div className="field">
                 <label>Cơ cấu giải thưởng (hiện trên trang đua, sửa được cả khi đang chạy)</label>
                 {form.prizes.map((p, i) => (
@@ -462,7 +618,8 @@ export default function AdminPage() {
                   <thead>
                     <tr>
                       <th>Hạng</th><th>±</th><th>ID</th><th>Học viên</th><th>Lớp</th><th>Kênh ✓</th>
-                      <th>Follower</th><th>Lượt xem</th><th>Video</th><th>Tương tác</th>
+                      <th>Follower kênh</th><th>View kênh</th>
+                      <th>Đ.Follower</th><th>Đ.Lượt xem</th><th>Đ.Video</th><th>Đ.Tương tác</th>
                       <th>Chuyên cần</th><th>Điều chỉnh</th><th>Hôm nay</th><th>Tổng</th>
                     </tr>
                   </thead>
@@ -477,6 +634,8 @@ export default function AdminPage() {
                           <td>{r.name}</td>
                           <td>{r.class_name ?? "—"}</td>
                           <td>{r.verified_channels ?? 0}</td>
+                          <td><b>{fmt(r.channel_followers ?? 0)}</b></td>
+                          <td><b>{fmt(r.channel_views ?? 0)}</b></td>
                           <td>{fmt(r.breakdown?.follower ?? 0)}</td>
                           <td>{fmt(r.breakdown?.views ?? 0)}</td>
                           <td>{fmt(r.breakdown?.new_video ?? 0)}</td>
@@ -488,7 +647,7 @@ export default function AdminPage() {
                         </tr>
                       );
                     })}
-                    {!lbRows.length && <tr><td colSpan={14}>Chưa có dữ liệu.</td></tr>}
+                    {!lbRows.length && <tr><td colSpan={16}>Chưa có dữ liệu.</td></tr>}
                   </tbody>
                 </table>
               </div>
@@ -500,25 +659,22 @@ export default function AdminPage() {
           <div>
             <div className="grid grid-3" style={{ marginBottom: 18 }}>
               <div className="stat">
-                <b style={{ color: scrape?.token_set ? "var(--green)" : "var(--red)" }}>
-                  {scrape ? (scrape.token_set ? "Đã kết nối" : "Chưa có token") : "…"}
-                </b>
-                <span>Apify API token</span>
-                {scrape && !scrape.token_set && <span className="tr down">Dán APIFY_TOKEN vào .env.local rồi khởi động lại</span>}
+                <b style={{ color: "var(--green)" }}>{scrape ? "Quét trực tiếp" : "…"}</b>
+                <span>Engine quét (miễn phí, không qua bên thứ ba)</span>
               </div>
               <div className="stat">
                 <b>{scrape ? `${scrape.channels_scanned_today}/${scrape.channels_total}` : "…"}</b>
                 <span>Kênh đã quét hôm nay</span>
               </div>
               <div className="stat">
-                <b>${scrape ? (scrape.cost.today ?? 0).toFixed(2) : "…"}</b>
-                <span>Chi phí Apify hôm nay (30 ngày: ${scrape ? (scrape.cost.last_30d ?? 0).toFixed(2) : "…"})</span>
+                <b>{scrape?.runs?.[0] ? new Date(scrape.runs[0].started_at).toLocaleString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh", hour: "2-digit", minute: "2-digit", day: "2-digit", month: "2-digit" }) : "—"}</b>
+                <span>Lần quét gần nhất</span>
               </div>
             </div>
 
             <div className="card" style={{ marginBottom: 18 }}>
               <h3>
-                📡 Cấu hình Actor theo nền tảng
+                📡 Nền tảng quét
                 <span style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
                   <button className="btn-ghost btn-sm" disabled={scrapeBusy} onClick={() => scrapeAction("scrape")}>
                     {scrapeBusy ? "Đang chạy…" : "▶ Quét ngay"}
@@ -530,29 +686,34 @@ export default function AdminPage() {
               </h3>
               <div className="table-scroll">
                 <table>
-                  <thead><tr><th>Nền tảng</th><th>Apify Actor</th><th>Trạng thái</th><th></th></tr></thead>
+                  <thead><tr><th>Nền tảng</th><th>Cách quét</th><th>Trạng thái</th><th></th></tr></thead>
                   <tbody>
-                    {(scrape?.configs ?? []).map((cfg: any) => (
-                      <tr key={cfg.platform}>
-                        <td><b>{cfg.platform}</b></td>
-                        <td style={{ fontFamily: "monospace", fontSize: 12 }}>{cfg.apify_actor}</td>
-                        <td><span className={`pill ${cfg.is_active ? "pill-live" : "pill-done"}`}>{cfg.is_active ? "Đang bật" : "Đang tắt"}</span></td>
-                        <td style={{ whiteSpace: "nowrap" }}>
-                          <button className="btn-ghost btn-sm" onClick={() => editActor(cfg)}>Đổi Actor</button>{" "}
-                          <button className="btn-ghost btn-sm" onClick={() => togglePlatform(cfg)}>{cfg.is_active ? "Tắt" : "Bật"}</button>
-                        </td>
-                      </tr>
-                    ))}
+                    {(scrape?.configs ?? []).map((cfg: any) => {
+                      const ENGINE: Record<string, string> = {
+                        tiktok: "Đọc trực tiếp trang profile",
+                        facebook: "Đọc trực tiếp trang (fb-cli)",
+                        youtube: "Chờ YouTube API key",
+                        instagram: "Chưa hỗ trợ quét trực tiếp",
+                      };
+                      return (
+                        <tr key={cfg.platform}>
+                          <td><b>{cfg.platform}</b></td>
+                          <td style={{ fontSize: 12.5, color: "var(--muted)" }}>{ENGINE[cfg.platform] ?? "—"}</td>
+                          <td><span className={`pill ${cfg.is_active ? "pill-live" : "pill-done"}`}>{cfg.is_active ? "Đang bật" : "Đang tắt"}</span></td>
+                          <td style={{ whiteSpace: "nowrap" }}>
+                            <button className="btn-ghost btn-sm" onClick={() => togglePlatform(cfg)}>{cfg.is_active ? "Tắt" : "Bật"}</button>
+                          </td>
+                        </tr>
+                      );
+                    })}
                     {scrape && !scrape.configs?.length && (
-                      <tr><td colSpan={4}>Chưa có cấu hình — chạy file supabase/seed.sql để nạp Actor mặc định.</td></tr>
+                      <tr><td colSpan={4}>Chưa có cấu hình nền tảng.</td></tr>
                     )}
                   </tbody>
                 </table>
               </div>
               <p className="mini-note" style={{ marginTop: 10 }}>
-                Lịch tự động: quét 05:30, tính điểm 06:00 giờ VN. Webhook nhận kết quả:{" "}
-                <code>{scrape?.app_url}/api/apify-callback</code>
-                {scrape && !scrape.webhook_secret_set && <b style={{ color: "var(--red)" }}> — chưa đặt APIFY_WEBHOOK_SECRET!</b>}
+                Lịch tự động: quét 05:30 · tính điểm 06:00 giờ VN. Quét trực tiếp từ máy chủ, không tốn phí dịch vụ ngoài.
               </p>
             </div>
 
@@ -579,10 +740,10 @@ export default function AdminPage() {
             </div>
 
             <div className="card">
-              <h3>🗂 20 run Apify gần nhất</h3>
+              <h3>🗂 20 lượt quét gần nhất</h3>
               <div className="table-scroll">
                 <table>
-                  <thead><tr><th>Thời điểm</th><th>Nền tảng</th><th>Actor</th><th>Kênh</th><th>Trạng thái</th><th>Chi phí</th></tr></thead>
+                  <thead><tr><th>Thời điểm</th><th>Nền tảng</th><th>Engine</th><th>Kênh</th><th>Trạng thái</th></tr></thead>
                   <tbody>
                     {(scrape?.runs ?? []).map((r: any) => (
                       <tr key={r.id}>
@@ -595,10 +756,9 @@ export default function AdminPage() {
                             {r.status === "succeeded" ? "Thành công" : r.status === "failed" ? "Lỗi" : "Đang chạy"}
                           </span>
                         </td>
-                        <td>{r.cost_usd != null ? `$${Number(r.cost_usd).toFixed(3)}` : "—"}</td>
                       </tr>
                     ))}
-                    {scrape && !scrape.runs?.length && <tr><td colSpan={6}>Chưa có run nào. Bấm "Quét ngay" để chạy thử.</td></tr>}
+                    {scrape && !scrape.runs?.length && <tr><td colSpan={5}>Chưa có lượt quét nào. Bấm "Quét ngay" để chạy thử.</td></tr>}
                   </tbody>
                 </table>
               </div>
@@ -606,6 +766,68 @@ export default function AdminPage() {
           </div>
         )}
       </div>
+
+      {editCamp && (() => {
+        const frozen = !["draft", "open"].includes(editCamp.status);
+        return (
+          <div className="modal-bg" onClick={() => setEditCamp(null)}>
+            <div className="modal" style={{ maxWidth: 560 }} onClick={(e) => e.stopPropagation()}>
+              <h3 style={{ fontWeight: 800, color: "var(--navy)", marginBottom: 4 }}>✏️ Sửa chiến dịch</h3>
+              {frozen && (
+                <p className="mini-note" style={{ marginBottom: 12 }}>
+                  Chiến dịch đã bắt đầu — <b>luật tính điểm bị đóng băng</b> (ngày bắt đầu, trọng số, chỉ tiêu tuần)
+                  để không thay luật giữa cuộc đua. Tên, ngày kết thúc và hạn đăng ký vẫn sửa được.
+                </p>
+              )}
+              <div className="field"><label>Tên chiến dịch</label>
+                <input value={editCamp.name} onChange={(e) => setEditCamp({ ...editCamp, name: e.target.value })} /></div>
+              {editCamp.scope === "class" && (
+                <div className="field"><label>Lớp áp dụng (giữ Cmd/Ctrl để chọn nhiều)</label>
+                  <select multiple size={Math.min(4, Math.max(2, classes.length))} value={editCamp.class_ids}
+                    onChange={(e) => setEditCamp({ ...editCamp, class_ids: Array.from(e.target.selectedOptions).map((o) => o.value) })}>
+                    {classes.map((cl) => <option key={cl.id} value={cl.id}>{cl.name}</option>)}
+                  </select>
+                  <p className="mini-note" style={{ marginTop: 4 }}>
+                    Bỏ lớp chỉ chặn đăng ký mới — học viên đã ghi danh vẫn ở lại đường đua.
+                  </p>
+                </div>
+              )}
+              <div className="two-col">
+                <div className="field"><label>Ngày bắt đầu{frozen ? " 🔒" : ""}</label>
+                  <DateField value={editCamp.start_date} disabled={frozen}
+                    onChange={(v) => setEditCamp({ ...editCamp, start_date: v })} /></div>
+                <div className="field"><label>Ngày kết thúc</label>
+                  <DateField value={editCamp.end_date}
+                    onChange={(v) => setEditCamp({ ...editCamp, end_date: v })} /></div>
+              </div>
+              <div className="field"><label>Hạn chốt đăng ký kênh (bỏ trống = không giới hạn)</label>
+                <DateField value={editCamp.registration_deadline}
+                  onChange={(v) => setEditCamp({ ...editCamp, registration_deadline: v })} /></div>
+              <div className="field"><label>Chỉ tiêu video tối thiểu mỗi tuần{frozen ? " 🔒" : ""}</label>
+                <input type="number" min={0} value={editCamp.weekly_quota} disabled={frozen}
+                  onChange={(e) => setEditCamp({ ...editCamp, weekly_quota: e.target.value })} /></div>
+              <label style={{ marginBottom: 6 }}>Trọng số điểm{frozen ? " 🔒" : ""}</label>
+              {([
+                ["follower", "Follower tăng thêm"],
+                ["per_1000_views", "Mỗi 1.000 lượt xem"],
+                ["new_video", "Mỗi video đăng mới"],
+                ["engagement", "Tương tác"],
+                ["weekly_bonus", "Chuyên cần (đủ chỉ tiêu tuần)"],
+              ] as const).map(([key, label]) => (
+                <div className="w-row" key={key}>
+                  <span>{label}</span>
+                  <input type="number" min={0} value={editCamp.weights[key] ?? "0"} disabled={frozen}
+                    onChange={(e) => setEditCamp({ ...editCamp, weights: { ...editCamp.weights, [key]: e.target.value } })} />
+                </div>
+              ))}
+              <div style={{ display: "flex", gap: 10, marginTop: 16 }}>
+                <button className="btn" style={{ width: "auto" }} onClick={saveCampaignEdit}>Lưu thay đổi</button>
+                <button className="btn-ghost" onClick={() => setEditCamp(null)}>Hủy</button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {prizeEdit && (
         <div className="modal-bg" onClick={() => setPrizeEdit(null)}>
@@ -645,6 +867,9 @@ export default function AdminPage() {
               <button className="btn-ghost btn-sm btn-danger" style={{ marginLeft: 10 }} onClick={toggleLock}>
                 {profile.student.status === "locked" ? "Mở khóa" : "Khóa học viên"}
               </button>
+              <button className="btn-ghost btn-sm btn-danger" style={{ marginLeft: 6 }} onClick={deleteStudent}>
+                🗑 Xóa hồ sơ
+              </button>
             </p>
 
             <h4 style={{ fontWeight: 800, fontSize: 13, color: "var(--navy)", margin: "10px 0 8px" }}>Kênh</h4>
@@ -653,15 +878,25 @@ export default function AdminPage() {
                 <div className="u">
                   <b>{c.platform} · @{c.username}</b>
                   <span>
-                    Baseline: {c.baseline_followers != null ? fmt(c.baseline_followers) : "—"} fl ·
-                    Mới nhất: {c.latest?.followers != null ? fmt(c.latest.followers) : "chưa quét"}
+                    {c.latest
+                      ? `${c.latest.followers != null ? fmt(c.latest.followers) : "—"} follower · ${c.latest.total_views != null ? fmt(Number(c.latest.total_views)) : "—"} view · ${c.latest.videos_count != null ? fmt(c.latest.videos_count) : "—"} video (${String(c.latest.snapshot_date).split("-").reverse().join("/")})`
+                      : "chưa quét lần nào"}
+                    {" · "}Baseline: {c.baseline_followers != null ? fmt(c.baseline_followers) : "—"} fl / {c.baseline_views != null ? fmt(Number(c.baseline_views)) : "—"} view
                   </span>
                 </div>
                 {c.status === "verified" ? <span className="st st-ok">Đã xác minh</span>
                   : c.status === "flagged" ? <span className="st st-flag">Gắn cờ</span>
+                  : c.status === "removed" ? <span className="st" style={{ color: "#8a94a6", borderColor: "#8a94a6" }}>Đã gỡ</span>
                   : <span className="st st-wait">Chờ xác minh</span>}
-                {c.status !== "verified" && (
-                  <button className="btn-ghost btn-sm" onClick={() => verifyChannel(c.id)}>Xác minh tay</button>
+                {c.status === "removed" ? (
+                  <button className="btn-ghost btn-sm" onClick={() => restoreChannel(c.id)}>Khôi phục</button>
+                ) : (
+                  <>
+                    {c.status !== "verified" && (
+                      <button className="btn-ghost btn-sm" onClick={() => verifyChannel(c.id)}>Xác minh tay</button>
+                    )}
+                    <button className="btn-ghost btn-sm btn-danger" onClick={() => removeChannel(c.id, c.username)}>Gỡ kênh</button>
+                  </>
                 )}
               </div>
             ))}
